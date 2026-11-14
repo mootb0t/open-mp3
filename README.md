@@ -96,8 +96,6 @@ The display's "SDA/SCL" labels are SPI, not I2C.
 - After 15 s idle in the menus, the screen returns to now playing.
 - The volume (12 steps) and the chosen view are remembered when the power is off.
 
-> **[You]** Why two now-playing views. What the countdown dial is for.
-
 ## Flashing the firmware
 
 Install:
