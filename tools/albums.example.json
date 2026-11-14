@@ -1,0 +1,13 @@
+[
+  {
+    "folder": "~/Music/Some Artist - Some Album",
+    "title": "Some Album",
+    "artist": "Some Artist",
+    "year": 2024,
+    "cover": "cover.jpg",
+    "tracks": [
+      ["01 first song.mp3", "First Song"],
+      ["02 second song.flac", "Second Song"]
+    ]
+  }
+]

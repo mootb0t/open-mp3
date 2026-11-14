@@ -1,0 +1,16 @@
+# Your own album list (copy tools/albums.example.json to tools/albums.json)
+tools/albums.json
+
+# Converted music made by prepare_sd.py
+music/
+sdcard/
+*.wav
+*.rgb
+
+# Build output
+build/
+*.bin
+*.elf
+
+__pycache__/
+.DS_Store
