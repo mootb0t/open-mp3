@@ -11,11 +11,12 @@ struct Album {
 };
 
 enum CmdType { CMD_PLAY, CMD_TOGGLE_PAUSE, CMD_NEXT, CMD_PREV };
-struct Cmd { CmdType type; int album, track; };
+struct Cmd { CmdType type; int album, track; uint32_t pos; bool paused; };   // pos/paused: CMD_PLAY only (resume)
 
 // What the screen shows. Written by the player, read by the UI; guarded by stateLock.
 struct PlayerState {
   bool active = false, paused = false;
+  bool cardError = false;   // a read failed and the card is being reconnected
   int album = -1, track = -1;
   uint32_t posFrames = 0, totalFrames = 0, rate = 0, posAtMs = 0;
 };

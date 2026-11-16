@@ -374,7 +374,14 @@ void draw() {
   frame.setTextSize(1);
   PlayerState s = getState();
 
-  if (screen == MESSAGE) {
+  if (s.cardError && screen != MESSAGE) {
+    frame.setFont(&fonts::Font2);
+    frame.setTextColor(AMBER);
+    frame.setTextDatum(textdatum_t::middle_center);
+    frame.drawString("SD CARD ERROR", CX, CY - 10);
+    frame.setTextColor(TICK);
+    frame.drawString((millis() / 500) % 2 ? "reconnecting..." : "reconnecting", CX, CY + 12);
+  } else if (screen == MESSAGE) {
     drawMessage();
   } else if (screen == ALBUMS) {
     drawAlbums();
@@ -464,6 +471,25 @@ void handleButtons() {
   }
 }
 
+// ---------- remembering what's playing ----------
+
+// Saves album, track, place and pause state, so a restart carries on from there. Only what changed
+// is written, and the place at most every 5 s (flash wear is negligible at that rate).
+void saveResume(const PlayerState &s) {
+  static int lastAlbum = -2, lastTrack = -2;
+  static int lastPaused = -1;
+  static uint32_t posDueMs = 0;
+  if (!s.active || s.cardError) return;
+  bool changed = false;
+  if (s.album != lastAlbum) { prefs.putString("rdir", albums[s.album].dir); lastAlbum = s.album; lastTrack = -2; changed = true; }
+  if (s.track != lastTrack) { prefs.putUShort("rtrack", s.track); lastTrack = s.track; changed = true; }
+  if ((int)s.paused != lastPaused) { prefs.putBool("rpaused", s.paused); lastPaused = s.paused; changed = true; }
+  if (changed || (!s.paused && (int32_t)(millis() - posDueMs) >= 0)) {
+    prefs.putUInt("rpos", s.posFrames);
+    posDueMs = millis() + 5000;
+  }
+}
+
 // ---------- task ----------
 
 void task(void *) {
@@ -472,10 +498,11 @@ void task(void *) {
   int lastTrack = -1, lastAlbum = -1;
   while (true) {
     if (uploading) screen = MESSAGE;   // music arriving over USB: show its progress
-    else if (ready && screen == MESSAGE) goTo(ALBUMS);
+    else if (ready && screen == MESSAGE) goTo(getState().active ? NOW : ALBUMS);
 
     if (ready) {
       PlayerState s = getState();
+      saveResume(s);
       if (s.track != lastTrack || s.album != lastAlbum) {   // new track: restart the title's scrolling
         lastTrack = s.track;
         lastAlbum = s.album;

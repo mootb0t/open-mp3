@@ -14,7 +14,9 @@
     GPIO42 press   previous album       up                    previous track   hold: volume down
     BOOT   press   go to now playing    go to now playing     switch cover view / countdown dial
   Holding GPIO1/42 in the albums screen or track list scrolls quickly.
-  The volume and the chosen now-playing view are remembered across power-offs.
+  The volume and the chosen now-playing view are remembered across power-offs, and so is what was
+  playing: after a restart it carries on from the same album, track and place (paused if it was paused).
+  If the card stops answering mid-song, the player reconnects it and carries on from the same spot.
 
   Wiring:
     PCM5102A:  VIN->3V3  GND->GND  BCK->GPIO9  LRCK->GPIO10  DIN->GPIO11  SCK->GND
@@ -93,6 +95,24 @@ int loadLibrary() {
   return albums.size();
 }
 
+// ---------- SD card ----------
+
+SPIClass sdSPI(FSPI);
+
+// 4 MHz: about 4x what full-quality WAV needs (ADPCM needs far less), and slow edges cope much better
+// with long or loose wires than 20 MHz did. 1 MHz as a fallback.
+bool mountSD() {
+  sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  for (uint32_t freq : { 4000000, 1000000 }) {
+    if (SD.begin(SD_CS, sdSPI, freq)) {
+      Serial.printf("SD card: %llu MB, SPI at %lu MHz\n", SD.cardSize() / (1024 * 1024), (unsigned long)(freq / 1000000));
+      return true;
+    }
+    SD.end();
+  }
+  return false;
+}
+
 // ---------- Player (its own task on core 1) ----------
 
 QueueHandle_t cmdQueue;
@@ -107,8 +127,8 @@ PlayerState getState() {
   return s;
 }
 
-void sendCmd(CmdType type, int album = 0, int track = 0) {
-  Cmd c = { type, album, track };
+void sendCmd(CmdType type, int album = 0, int track = 0, uint32_t pos = 0, bool paused = false) {
+  Cmd c = { type, album, track, pos, paused };
   xQueueSend(cmdQueue, &c, 0);
 }
 
@@ -189,7 +209,7 @@ void playerTask(void *) {
 
   File f;
   int album = -1, track = -1, channels = 2;
-  bool adpcm = false, paused = false;
+  bool adpcm = false, paused = false, cardError = false;
   uint32_t blockAlign = 0, framesPerBlock = 1;
   uint32_t dataStart = 0, dataSize = 0, totalFrames = 0, pos = 0, rate = 0, clockRate = 44100;
   uint32_t sinceStart = 0;            // frames written since the last start/resume, to know how full the buffers are
@@ -200,6 +220,7 @@ void playerTask(void *) {
     portENTER_CRITICAL(&stateLock);
     state.active = album >= 0;
     state.paused = paused;
+    state.cardError = cardError;
     state.album = album;
     state.track = track;
     state.posFrames = heard;
@@ -221,12 +242,32 @@ void playerTask(void *) {
     }
   };
 
+  // The card stopped answering (a loose wire or a power dip): reconnect it, retrying every second
+  // until it's back. Shows "SD CARD ERROR" meanwhile. Nothing is skipped.
+  auto reconnectCard = [&]() {
+    if (f) f.close();
+    i2s_zero_dma_buffer(I2S_NUM_0);
+    cardError = true;
+    publish();
+    for (int attempt = 1;; attempt++) {
+      SD.end();
+      if (mountSD()) { Serial.printf("SD card reconnected (attempt %d)\n", attempt); break; }
+      vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    cardError = false;
+  };
+
   // Opens albums[a].tracks[t]. Returns false if the file can't be played.
   auto open = [&](int a, int t) -> bool {
     if (f) f.close();
     album = a; track = t; pos = 0; sinceStart = 0; totalFrames = 0;
     String path = albums[a].dir + "/" + albums[a].tracks[t].file;
     f = SD.open(path);
+    if (!f) {   // maybe the card dropped out: reconnect and try once more before skipping the track
+      Serial.printf("can't open %s, checking the card\n", path.c_str());
+      reconnectCard();
+      f = SD.open(path);
+    }
     if (!f) { Serial.printf("can't open %s\n", path.c_str()); return false; }
     uint8_t h[12];
     if (f.read(h, 12) != 12 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "WAVE", 4)) { Serial.printf("not a WAV: %s\n", path.c_str()); return false; }
@@ -283,6 +324,17 @@ void playerTask(void *) {
     album = -1;   // nothing plays
   };
 
+  // A read failed mid-track: reconnect the card and carry on from the same place
+  auto recover = [&]() {
+    int a = album, t = track;
+    uint32_t at = pos;
+    Serial.printf("SD read failed at %lu s, reconnecting\n", (unsigned long)(rate ? at / rate : 0));
+    reconnectCard();
+    if (open(a, t)) seekTo(min(at, totalFrames));
+    else next();
+    sinceStart = 0;
+  };
+
   while (true) {
     Cmd c;
     bool idle = album < 0 || paused;
@@ -292,6 +344,10 @@ void playerTask(void *) {
           paused = false;
           i2s_zero_dma_buffer(I2S_NUM_0);
           if (!open(c.album, c.track)) { album = c.album; track = c.track; next(); }
+          else if (c.pos) {   // resuming where it left off before a restart
+            if (c.pos < totalFrames) seekTo(c.pos);
+            paused = c.paused;
+          }
           break;
         case CMD_TOGGLE_PAUSE:
           if (album < 0) break;
@@ -329,6 +385,11 @@ void playerTask(void *) {
       } else {
         uint32_t want = min<uint32_t>(PCM_CHUNK, totalFrames - pos);
         frames = f.read((uint8_t *)pcm, want * channels * 2) / (channels * 2);
+      }
+      if (frames == 0) {   // the track isn't over, so this is the card failing
+        recover();
+        publish();
+        continue;
       }
     }
     if (frames == 0) {   // end of the track: straight on to the next, no gap
@@ -461,20 +522,6 @@ void serialTask(void *) {
 
 // ---------- Setup ----------
 
-SPIClass sdSPI(FSPI);
-
-bool mountSD() {
-  sdSPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-  for (uint32_t freq : { 20000000, 10000000, 4000000 }) {
-    if (SD.begin(SD_CS, sdSPI, freq)) {
-      Serial.printf("SD card: %llu MB, SPI at %lu MHz\n", SD.cardSize() / (1024 * 1024), (unsigned long)(freq / 1000000));
-      return true;
-    }
-    SD.end();
-  }
-  return false;
-}
-
 void setup() {
   Serial.setRxBufferSize(65536);   // room for incoming music while the card is busy writing
   Serial.begin(115200);
@@ -513,6 +560,23 @@ void setup() {
   cmdQueue = xQueueCreate(8, sizeof(Cmd));
   // Core 1, above the Arduino loop: the player only waits on the DAC
   xTaskCreatePinnedToCore(playerTask, "player", 8192, nullptr, 5, nullptr, 1);
+
+  // Carry on with what was playing before the power went off
+  String dir = prefs.getString("rdir", "");
+  for (int a = 0; a < (int)albums.size(); a++) {
+    if (albums[a].dir != dir) continue;
+    int t = prefs.getUShort("rtrack", 0);
+    if (t >= (int)albums[a].tracks.size()) break;
+    bool paused = prefs.getBool("rpaused", false);
+    uint32_t pos = prefs.getUInt("rpos", 0);
+    Serial.printf("Resuming %s, track %d at %lu s%s\n", albums[a].title.c_str(), t + 1,
+                  (unsigned long)(pos / 44100), paused ? " (paused)" : "");
+    sendCmd(CMD_PLAY, a, t, max<uint32_t>(pos, 1), paused);
+    ui::selAlbum = a;
+    ui::selTrack = t;
+    for (int i = 0; i < 100 && !getState().active; i++) delay(10);
+    break;
+  }
   ui::setReady();
 }
 
