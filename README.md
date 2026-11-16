@@ -19,7 +19,9 @@
 | 1.28" round 240×240 display, GC9A01 | SPI; the backlight is always on |
 | SPI microSD card module | FAT32 card; a 32 GB card holds roughly 150 albums |
 | 3 push buttons | each wired from a GPIO to GND (internal pull-ups) |
-| LiPo battery + 5 V boost converter | boost output to the board's 5V pin |
+| 1-cell LiPo battery | 3.7 V |
+| TP4056 USB-C charging board **with protection** (DW01A, has OUT+/OUT− pads) | charges the LiPo and cuts it off on over-discharge, overcharge or short |
+| 5 V boost converter | boost output to the board's 5V pin |
 | Perfboard, hookup wire, headphones | |
 
 >  Cost about £30 altogether, a mix of amazon/ali-express parts and old scrap. I would recommend just pasting in part names to ali-express!
@@ -40,6 +42,18 @@
 | DEMP | GND |
 | XSMT | 3V3 (unmuted) |
 | FMT | GND |
+
+**Power**
+```
+LiPo ── B+/B− [TP4056] OUT+/OUT− ── boost converter ── 5V pin
+```
+| From | To |
+|---|---|
+| LiPo + / − | TP4056 B+ / B− |
+| TP4056 OUT+ / OUT− | boost converter IN+ / IN− |
+| boost converter OUT+ | ESP32-S3 5V |
+| boost converter OUT− | GND |
+Charge through the TP4056's USB-C port.
 
 **GC9A01 display** (on its own SPI bus)
 
